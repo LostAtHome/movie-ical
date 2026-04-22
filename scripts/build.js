@@ -43,10 +43,10 @@ function parseHTML(html, year) {
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - 30);
 
-  // Only use full dates from table cells — never infer month from headings.
-  // The first cell of each date row always contains "Month Day" e.g. "May 22".
-  // Subsequent rows on the same date have a rowspan and omit the date cell,
-  // so we track the last seen date and reuse it.
+  // Strategy: every date row's first cell contains "Month Day" e.g. "May 22".
+  // Rows that share a date (rowspan) have fewer cells and no date in cell[0].
+  // We track lastDate for rowspan rows.
+  // We NEVER use headings for month — headings are quarterly ranges.
 
   let lastDate = null;
 
@@ -55,6 +55,10 @@ function parseHTML(html, year) {
 
   while ((trMatch = trRe.exec(html)) !== null) {
     const rowHtml = trMatch[1];
+
+    // Skip header rows
+    if (/<th\b/i.test(rowHtml) && !/<td\b/i.test(rowHtml)) continue;
+
     const cells = [];
     const tdRe = /<td\b[^>]*>([\s\S]*?)<\/td>/gi;
     let tdMatch;
@@ -66,37 +70,46 @@ function parseHTML(html, year) {
     let dateStr = null;
     let titleIdx = 1;
 
-    // Check first cell for a full "Month Day" date
+    // Try to find "Month Day" in first cell
     const c0 = cells[0];
     const fullDate = c0.match(/\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2})\b/i);
+
     if (fullDate) {
       const month = MONTH_NUM[fullDate[1].toLowerCase()];
-      const day = fullDate[2].padStart(2, '0');
-      dateStr = `${year}-${month}-${day}`;
-      lastDate = dateStr;
-      titleIdx = 1;
+      const day = parseInt(fullDate[2]);
+      if (day >= 1 && day <= 31) {
+        dateStr = `${year}-${month}-${String(day).padStart(2,'0')}`;
+        lastDate = dateStr;
+        titleIdx = 1;
+      }
     } else if (lastDate && cells.length >= 1) {
-      // No date in first cell — this row shares the date from above (rowspan)
+      // Rowspan row — reuse last date, title is in first cell
       dateStr = lastDate;
       titleIdx = 0;
     }
 
     if (!dateStr) continue;
+    if (titleIdx >= cells.length) continue;
 
-    const titleCell = cells[titleIdx];
-    if (!titleCell) continue;
+    let title = cells[titleIdx]
+      .replace(/\(.*?\)/g, '')
+      .replace(/\[.*?\]/g, '')
+      .trim();
 
-    let title = titleCell.replace(/\(.*?\)/g, '').replace(/\[.*?\]/g, '').trim();
     if (!title || title.length < 2) continue;
-    if (/^(title|film|opening|release|tba|tbd|\$[\d,])/i.test(title)) continue;
-    // Skip if it looks like a studio name or person name row
-    if (/^(warner|disney|paramount|universal|sony|netflix|amazon|apple|lionsgate|mgm|columbia|fox|a24|neon)/i.test(title)) continue;
+    if (/^(title|film|opening|release|tba|tbd)/i.test(title)) continue;
+    if (/^\$[\d,]/.test(title)) continue;
+    // Skip obvious non-title cells (studios, distributor names)
+    if (/^(warner|disney|paramount|universal|sony|netflix|amazon|apple|lionsgate|mgm|columbia|20th century|neon|a24|focus|searchlight|roadside)/i.test(title)) continue;
 
     const rd = new Date(dateStr + 'T12:00:00');
     if (isNaN(rd.getTime()) || rd < cutoff) continue;
 
     const key = `${dateStr}::${title.toLowerCase()}`;
-    if (!seen.has(key)) { seen.add(key); results.push({ title, releaseDate: dateStr }); }
+    if (!seen.has(key)) {
+      seen.add(key);
+      results.push({ title, releaseDate: dateStr });
+    }
   }
 
   results.sort((a, b) => a.releaseDate.localeCompare(b.releaseDate));
@@ -162,8 +175,8 @@ async function main() {
       const html = await get(url);
       console.log(`  HTML length: ${html.length}`);
       const movies = parseHTML(html, page.year);
-      console.log(`  -> ${movies.length} titles found`);
-      movies.slice(0, 5).forEach(m => console.log(`     ${m.releaseDate} ${m.title}`));
+      console.log(`  -> ${movies.length} titles`);
+      movies.slice(0,8).forEach(m => console.log(`     ${m.releaseDate} | ${m.title}`));
       for (const m of movies) {
         const key = `${m.releaseDate}::${m.title.toLowerCase()}`;
         if (!globalSeen.has(key)) { globalSeen.add(key); allMovies.push(m); }
