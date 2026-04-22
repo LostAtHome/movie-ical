@@ -38,47 +38,40 @@ const MONTH_NUM = {
   september:'09', october:'10', november:'11', december:'12'
 };
 
-// Detect spaced-out month names like "J A N U A R Y" or "M A Y"
-function detectSpacedMonth(str) {
-  const collapsed = str.replace(/\s+/g, '').toLowerCase();
-  for (const [name, num] of Object.entries(MONTH_NUM)) {
-    if (collapsed === name || collapsed.startsWith(name + ':')) return num;
-  }
-  return null;
-}
-
 function parseFilmPage(html, year) {
   const results = [];
   const seen = new Set();
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - 30);
 
+  // Strip all HTML and work with plain text
   const text = stripTags(html);
   const lines = text.split('\n');
-
   let currentMonth = null;
 
   for (const line of lines) {
     const trimmed = line.trim();
     if (!trimmed) continue;
 
-    // ── Detect month heading ──────────────────────────────────────────────────
-    // Handles "J A N U A R Y", "J A N U A R Y:", "JANUARY", "January", etc.
-    // Also handles lines like "J A N U A R Y: 2; Movie Title; ..."
-    // Extract just the month part before any colon+digits
-    const monthPart = trimmed.split(':')[0].trim();
-    const spaced = detectSpacedMonth(monthPart);
-    if (spaced) {
-      currentMonth = spaced;
-      // After setting month, check if there's a movie on the same line
-      // e.g. "J A N U A R Y: 2; We Bury the Dead; ..."
-      const afterColon = trimmed.indexOf(':');
-      if (afterColon !== -1) {
-        const rest = trimmed.slice(afterColon + 1).trim();
-        const rowMatch = rest.match(/^(\d{1,2})\s*[;:]\s*([^;|]+)/);
-        if (rowMatch) {
-          const day = rowMatch[1].padStart(2, '0');
-          let title = rowMatch[2].replace(/\(.*?\)/g, '').replace(/\[.*?\]/g, '').trim();
+    // ── Detect month ─────────────────────────────────────────────────────────
+    // Wikipedia uses spaced letters: "J A N U A R Y" "F E B R U A R Y" etc.
+    // Remove all spaces and check if it matches a month name (before any colon)
+    const beforeColon = trimmed.split(':')[0];
+    const noSpaces = beforeColon.replace(/\s+/g, '').toLowerCase();
+    let foundMonth = null;
+    for (const [name, num] of Object.entries(MONTH_NUM)) {
+      if (noSpaces === name) { foundMonth = num; break; }
+    }
+    if (foundMonth) {
+      currentMonth = foundMonth;
+      // Also check if there's a movie entry on the same line after the colon
+      const colonIdx = trimmed.indexOf(':');
+      if (colonIdx !== -1) {
+        const rest = trimmed.slice(colonIdx + 1).trim();
+        const m = rest.match(/^(\d{1,2})\s*[;:]\s*([^;|]+)/);
+        if (m) {
+          const day = m[1].padStart(2, '0');
+          let title = m[2].replace(/\(.*?\)/g, '').replace(/\[.*?\]/g, '').trim();
           if (title && title.length >= 2 && !/^(title|film|opening|release)/i.test(title)) {
             const dateStr = `${year}-${currentMonth}-${day}`;
             const rd = new Date(dateStr + 'T12:00:00');
@@ -94,20 +87,18 @@ function parseFilmPage(html, year) {
 
     if (!currentMonth) continue;
 
-    // ── Detect movie rows ─────────────────────────────────────────────────────
+    // ── Detect movie row ──────────────────────────────────────────────────────
     // Format: "22; The Mandalorian and Grogu; Studio; ..."
-    // or:     "22: The Mandalorian and Grogu; Studio; ..."
     const rowMatch = trimmed.match(/^(\d{1,2})\s*[;:]\s*([^;|]+)/);
     if (!rowMatch) continue;
 
-    const day = rowMatch[1].padStart(2, '0');
     const dayNum = parseInt(rowMatch[1]);
     if (dayNum < 1 || dayNum > 31) continue;
+    const day = rowMatch[1].padStart(2, '0');
 
     let title = rowMatch[2].replace(/\(.*?\)/g, '').replace(/\[.*?\]/g, '').trim();
     if (!title || title.length < 2) continue;
     if (/^(title|film|opening|release|rank|distributor)/i.test(title)) continue;
-    // Skip if title looks like a dollar amount or number
     if (/^\$[\d,]/.test(title) || /^\d+$/.test(title)) continue;
 
     const dateStr = `${year}-${currentMonth}-${day}`;
@@ -160,16 +151,16 @@ function buildHTML(movies, username) {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Theater Releases iCal</title>
 <style>
-  body { font-family: system-ui, sans-serif; max-width: 680px; margin: 0 auto; padding: 40px 20px; color: #1a1a1a; }
-  h1 { font-size: 22px; font-weight: 600; margin-bottom: 6px; }
-  .sub { color: #666; font-size: 14px; margin-bottom: 24px; }
-  .box { background: #f5f5f5; border-radius: 8px; padding: 16px 20px; margin-bottom: 24px; }
-  .url { font-family: monospace; font-size: 13px; word-break: break-all; background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 10px 14px; display: block; margin-top: 8px; }
-  table { width: 100%; border-collapse: collapse; font-size: 14px; margin-top: 16px; }
-  th { text-align: left; font-size: 12px; color: #888; padding-bottom: 8px; border-bottom: 1px solid #eee; }
-  td { padding: 7px 0; border-bottom: 1px solid #f0f0f0; }
-  td:first-child { color: #888; font-size: 13px; width: 110px; }
-  footer { margin-top: 32px; font-size: 12px; color: #bbb; }
+  body{font-family:system-ui,sans-serif;max-width:680px;margin:0 auto;padding:40px 20px;color:#1a1a1a;}
+  h1{font-size:22px;font-weight:600;margin-bottom:6px;}
+  .sub{color:#666;font-size:14px;margin-bottom:24px;}
+  .box{background:#f5f5f5;border-radius:8px;padding:16px 20px;margin-bottom:24px;}
+  .url{font-family:monospace;font-size:13px;word-break:break-all;background:#fff;border:1px solid #ddd;border-radius:6px;padding:10px 14px;display:block;margin-top:8px;}
+  table{width:100%;border-collapse:collapse;font-size:14px;margin-top:16px;}
+  th{text-align:left;font-size:12px;color:#888;padding-bottom:8px;border-bottom:1px solid #eee;}
+  td{padding:7px 0;border-bottom:1px solid #f0f0f0;}
+  td:first-child{color:#888;font-size:13px;width:110px;}
+  footer{margin-top:32px;font-size:12px;color:#bbb;}
 </style>
 </head>
 <body>
