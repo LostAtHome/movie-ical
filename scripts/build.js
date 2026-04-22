@@ -24,183 +24,32 @@ function get(url) {
 }
 
 function stripTags(s) {
-  return s
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ')
-    .replace(/&#\d+;/g, '').replace(/\s+/g, ' ').trim();
-}
-
-const MONTH_NUM = {
-  january:'01', february:'02', march:'03', april:'04',
-  may:'05', june:'06', july:'07', august:'08',
-  september:'09', october:'10', november:'11', december:'12'
-};
-
-function parseHTML(html, year) {
-  const results = [];
-  const seen = new Set();
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - 30);
-
-  // Strategy: every date row's first cell contains "Month Day" e.g. "May 22".
-  // Rows that share a date (rowspan) have fewer cells and no date in cell[0].
-  // We track lastDate for rowspan rows.
-  // We NEVER use headings for month — headings are quarterly ranges.
-
-  let lastDate = null;
-
-  const trRe = /<tr\b[^>]*>([\s\S]*?)<\/tr>/gi;
-  let trMatch;
-
-  while ((trMatch = trRe.exec(html)) !== null) {
-    const rowHtml = trMatch[1];
-
-    // Skip header rows
-    if (/<th\b/i.test(rowHtml) && !/<td\b/i.test(rowHtml)) continue;
-
-    const cells = [];
-    const tdRe = /<td\b[^>]*>([\s\S]*?)<\/td>/gi;
-    let tdMatch;
-    while ((tdMatch = tdRe.exec(rowHtml)) !== null) {
-      cells.push(stripTags(tdMatch[1]).trim());
-    }
-    if (cells.length < 1) continue;
-
-    let dateStr = null;
-    let titleIdx = 1;
-
-    // Try to find "Month Day" in first cell
-    const c0 = cells[0];
-    const fullDate = c0.match(/\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2})\b/i);
-
-    if (fullDate) {
-      const month = MONTH_NUM[fullDate[1].toLowerCase()];
-      const day = parseInt(fullDate[2]);
-      if (day >= 1 && day <= 31) {
-        dateStr = `${year}-${month}-${String(day).padStart(2,'0')}`;
-        lastDate = dateStr;
-        titleIdx = 1;
-      }
-    } else if (lastDate && cells.length >= 1) {
-      // Rowspan row — reuse last date, title is in first cell
-      dateStr = lastDate;
-      titleIdx = 0;
-    }
-
-    if (!dateStr) continue;
-    if (titleIdx >= cells.length) continue;
-
-    let title = cells[titleIdx]
-      .replace(/\(.*?\)/g, '')
-      .replace(/\[.*?\]/g, '')
-      .trim();
-
-    if (!title || title.length < 2) continue;
-    if (/^(title|film|opening|release|tba|tbd)/i.test(title)) continue;
-    if (/^\$[\d,]/.test(title)) continue;
-    // Skip obvious non-title cells (studios, distributor names)
-    if (/^(warner|disney|paramount|universal|sony|netflix|amazon|apple|lionsgate|mgm|columbia|20th century|neon|a24|focus|searchlight|roadside)/i.test(title)) continue;
-
-    const rd = new Date(dateStr + 'T12:00:00');
-    if (isNaN(rd.getTime()) || rd < cutoff) continue;
-
-    const key = `${dateStr}::${title.toLowerCase()}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      results.push({ title, releaseDate: dateStr });
-    }
-  }
-
-  results.sort((a, b) => a.releaseDate.localeCompare(b.releaseDate));
-  return results;
-}
-
-function buildICS(movies) {
-  const stamp = new Date().toISOString().replace(/[-:.]/g, '').slice(0, 15) + 'Z';
-  const lines = [
-    'BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//lostathome//movie-ical//EN',
-    'CALSCALE:GREGORIAN','METHOD:PUBLISH','X-WR-CALNAME:Theater Releases',
-    'X-WR-CALDESC:Upcoming US theatrical releases. Updated every Monday.',
-    'REFRESH-INTERVAL;VALUE=DURATION:P1W','X-PUBLISHED-TTL:P1W',
-  ];
-  movies.forEach((m, i) => {
-    const start = m.releaseDate.replace(/-/g, '');
-    const endDate = new Date(m.releaseDate + 'T00:00:00Z');
-    endDate.setUTCDate(endDate.getUTCDate() + 1);
-    const end = endDate.toISOString().slice(0, 10).replace(/-/g, '');
-    const uid = `movie-${start}-${i}@lostathome-movie-ical`;
-    const summary = m.title.replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,');
-    lines.push('BEGIN:VEVENT',`UID:${uid}`,`DTSTAMP:${stamp}`,
-      `DTSTART;VALUE=DATE:${start}`,`DTEND;VALUE=DATE:${end}`,
-      `SUMMARY:${summary}`,'END:VEVENT');
-  });
-  lines.push('END:VCALENDAR');
-  return lines.join('\r\n');
-}
-
-function buildHTML(movies, username) {
-  const feedUrl = `https://${username}.github.io/movie-ical/movies.ics`;
-  const rows = movies.map(m => `<tr><td>${m.releaseDate}</td><td>${m.title}</td></tr>`).join('\n');
-  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>Theater Releases iCal</title>
-<style>body{font-family:system-ui,sans-serif;max-width:680px;margin:0 auto;padding:40px 20px;}
-.url{font-family:monospace;font-size:13px;word-break:break-all;background:#f5f5f5;padding:10px;border-radius:6px;display:block;margin:8px 0 24px;}
-table{width:100%;border-collapse:collapse;font-size:14px;}th{text-align:left;font-size:12px;color:#888;padding-bottom:8px;border-bottom:1px solid #eee;}
-td{padding:7px 0;border-bottom:1px solid #f0f0f0;}td:first-child{color:#888;font-size:13px;width:110px;}</style>
-</head><body><h1>Theater Releases iCal</h1>
-<p>Apple Calendar → File → New Calendar Subscription:</p>
-<span class="url">${feedUrl}</span>
-<p style="font-size:13px;color:#888;margin-bottom:8px;">${movies.length} releases</p>
-<table><thead><tr><th>Date</th><th>Title</th></tr></thead><tbody>${rows}</tbody></table>
-</body></html>`;
+  return s.replace(/<[^>]+>/g, ' ').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&nbsp;/g,' ').replace(/&#\d+;/g,'').replace(/\s+/g,' ').trim();
 }
 
 async function main() {
-  const today = new Date();
-  const thisYear = today.getFullYear();
-  const nextYear = thisYear + 1;
+  const url = 'https://en.wikipedia.org/api/rest_v1/page/html/List_of_American_films_of_2026';
+  console.log('Fetching...');
+  const html = await get(url);
+  console.log(`HTML length: ${html.length}`);
 
-  const pages = [
-    { title: `List_of_American_films_of_${thisYear}`, year: thisYear },
-    { title: `List_of_American_films_of_${nextYear}`, year: nextYear },
-  ];
-
-  const allMovies = [];
-  const globalSeen = new Set();
-
-  for (const page of pages) {
-    console.log(`Fetching: ${page.title}`);
-    try {
-      const url = `https://en.wikipedia.org/api/rest_v1/page/html/${page.title}`;
-      const html = await get(url);
-      console.log(`  HTML length: ${html.length}`);
-      const movies = parseHTML(html, page.year);
-      console.log(`  -> ${movies.length} titles`);
-      movies.slice(0,8).forEach(m => console.log(`     ${m.releaseDate} | ${m.title}`));
-      for (const m of movies) {
-        const key = `${m.releaseDate}::${m.title.toLowerCase()}`;
-        if (!globalSeen.has(key)) { globalSeen.add(key); allMovies.push(m); }
-      }
-    } catch (err) {
-      console.warn(`  -> Failed: ${err.message}`);
+  // Dump first 30 table rows that contain td cells, showing raw HTML
+  const trRe = /<tr\b[^>]*>([\s\S]*?)<\/tr>/gi;
+  let count = 0;
+  let m;
+  while ((m = trRe.exec(html)) !== null && count < 30) {
+    const row = m[1];
+    if (!/<td\b/i.test(row)) continue;
+    const cells = [];
+    const tdRe = /<td\b[^>]*>([\s\S]*?)<\/td>/gi;
+    let tm;
+    while ((tm = tdRe.exec(row)) !== null) {
+      cells.push(stripTags(tm[1]).slice(0, 60));
     }
-  }
-
-  allMovies.sort((a, b) => a.releaseDate.localeCompare(b.releaseDate));
-  console.log(`Total: ${allMovies.length} movies`);
-
-  const outDir = path.resolve(__dirname, '..', 'docs');
-  fs.mkdirSync(outDir, { recursive: true });
-
-  if (allMovies.length > 0) {
-    const username = process.env.GITHUB_REPOSITORY ? process.env.GITHUB_REPOSITORY.split('/')[0] : 'lostathome';
-    fs.writeFileSync(path.join(outDir, 'movies.ics'), buildICS(allMovies), 'utf8');
-    fs.writeFileSync(path.join(outDir, 'index.html'), buildHTML(allMovies, username), 'utf8');
-    console.log('Written successfully.');
-  } else {
-    console.error('No movies found.');
-    process.exit(1);
+    if (cells.length < 2) continue;
+    console.log(`ROW ${count}: [${cells.join(' | ')}]`);
+    count++;
   }
 }
 
-main().catch(err => { console.error(err); process.exit(1); });
+main().catch(e => { console.error(e); process.exit(1); });
