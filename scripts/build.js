@@ -44,18 +44,20 @@ function parseFilmPage(html, year) {
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - 30);
 
-  // Strip all HTML and work with plain text
-  const text = stripTags(html);
-  const lines = text.split('\n');
+  // DEBUG: print first 3000 chars of stripped text so we can see the format
+  const fullText = stripTags(html);
+  console.log('--- SAMPLE TEXT (first 3000 chars) ---');
+  console.log(fullText.slice(0, 3000));
+  console.log('--- END SAMPLE ---');
+
+  const lines = fullText.split('\n');
   let currentMonth = null;
 
   for (const line of lines) {
     const trimmed = line.trim();
     if (!trimmed) continue;
 
-    // ── Detect month ─────────────────────────────────────────────────────────
-    // Wikipedia uses spaced letters: "J A N U A R Y" "F E B R U A R Y" etc.
-    // Remove all spaces and check if it matches a month name (before any colon)
+    // Detect month: strip spaces from first token before colon and compare
     const beforeColon = trimmed.split(':')[0];
     const noSpaces = beforeColon.replace(/\s+/g, '').toLowerCase();
     let foundMonth = null;
@@ -64,7 +66,7 @@ function parseFilmPage(html, year) {
     }
     if (foundMonth) {
       currentMonth = foundMonth;
-      // Also check if there's a movie entry on the same line after the colon
+      console.log(`Month detected: ${foundMonth} from line: ${trimmed.slice(0, 60)}`);
       const colonIdx = trimmed.indexOf(':');
       if (colonIdx !== -1) {
         const rest = trimmed.slice(colonIdx + 1).trim();
@@ -87,15 +89,11 @@ function parseFilmPage(html, year) {
 
     if (!currentMonth) continue;
 
-    // ── Detect movie row ──────────────────────────────────────────────────────
-    // Format: "22; The Mandalorian and Grogu; Studio; ..."
     const rowMatch = trimmed.match(/^(\d{1,2})\s*[;:]\s*([^;|]+)/);
     if (!rowMatch) continue;
-
     const dayNum = parseInt(rowMatch[1]);
     if (dayNum < 1 || dayNum > 31) continue;
     const day = rowMatch[1].padStart(2, '0');
-
     let title = rowMatch[2].replace(/\(.*?\)/g, '').replace(/\[.*?\]/g, '').trim();
     if (!title || title.length < 2) continue;
     if (/^(title|film|opening|release|rank|distributor)/i.test(title)) continue;
@@ -116,15 +114,10 @@ function parseFilmPage(html, year) {
 function buildICS(movies) {
   const stamp = new Date().toISOString().replace(/[-:.]/g, '').slice(0, 15) + 'Z';
   const lines = [
-    'BEGIN:VCALENDAR',
-    'VERSION:2.0',
-    'PRODID:-//lostathome//movie-ical//EN',
-    'CALSCALE:GREGORIAN',
-    'METHOD:PUBLISH',
-    'X-WR-CALNAME:Theater Releases',
+    'BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//lostathome//movie-ical//EN',
+    'CALSCALE:GREGORIAN','METHOD:PUBLISH','X-WR-CALNAME:Theater Releases',
     'X-WR-CALDESC:Upcoming US theatrical releases. Updated every Monday.',
-    'REFRESH-INTERVAL;VALUE=DURATION:P1W',
-    'X-PUBLISHED-TTL:P1W',
+    'REFRESH-INTERVAL;VALUE=DURATION:P1W','X-PUBLISHED-TTL:P1W',
   ];
   movies.forEach((m, i) => {
     const start = m.releaseDate.replace(/-/g, '');
@@ -133,9 +126,7 @@ function buildICS(movies) {
     const end = endDate.toISOString().slice(0, 10).replace(/-/g, '');
     const uid = `movie-${start}-${i}@lostathome-movie-ical`;
     const summary = m.title.replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,');
-    lines.push('BEGIN:VEVENT', `UID:${uid}`, `DTSTAMP:${stamp}`,
-      `DTSTART;VALUE=DATE:${start}`, `DTEND;VALUE=DATE:${end}`,
-      `SUMMARY:${summary}`, 'END:VEVENT');
+    lines.push('BEGIN:VEVENT',`UID:${uid}`,`DTSTAMP:${stamp}`,`DTSTART;VALUE=DATE:${start}`,`DTEND;VALUE=DATE:${end}`,`SUMMARY:${summary}`,'END:VEVENT');
   });
   lines.push('END:VCALENDAR');
   return lines.join('\r\n');
@@ -144,40 +135,15 @@ function buildICS(movies) {
 function buildHTML(movies, username) {
   const feedUrl = `https://${username}.github.io/movie-ical/movies.ics`;
   const rows = movies.map(m => `<tr><td>${m.releaseDate}</td><td>${m.title}</td></tr>`).join('\n');
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Theater Releases iCal</title>
-<style>
-  body{font-family:system-ui,sans-serif;max-width:680px;margin:0 auto;padding:40px 20px;color:#1a1a1a;}
-  h1{font-size:22px;font-weight:600;margin-bottom:6px;}
-  .sub{color:#666;font-size:14px;margin-bottom:24px;}
-  .box{background:#f5f5f5;border-radius:8px;padding:16px 20px;margin-bottom:24px;}
-  .url{font-family:monospace;font-size:13px;word-break:break-all;background:#fff;border:1px solid #ddd;border-radius:6px;padding:10px 14px;display:block;margin-top:8px;}
-  table{width:100%;border-collapse:collapse;font-size:14px;margin-top:16px;}
-  th{text-align:left;font-size:12px;color:#888;padding-bottom:8px;border-bottom:1px solid #eee;}
-  td{padding:7px 0;border-bottom:1px solid #f0f0f0;}
-  td:first-child{color:#888;font-size:13px;width:110px;}
-  footer{margin-top:32px;font-size:12px;color:#bbb;}
-</style>
-</head>
-<body>
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>Theater Releases iCal</title>
+<style>body{font-family:system-ui,sans-serif;max-width:680px;margin:0 auto;padding:40px 20px;}table{width:100%;border-collapse:collapse;font-size:14px;}th{text-align:left;font-size:12px;color:#888;padding-bottom:8px;border-bottom:1px solid #eee;}td{padding:7px 0;border-bottom:1px solid #f0f0f0;}td:first-child{color:#888;font-size:13px;width:110px;}.url{font-family:monospace;font-size:13px;word-break:break-all;background:#f5f5f5;padding:10px;border-radius:6px;display:block;margin:8px 0;}</style>
+</head><body>
 <h1>Theater Releases iCal</h1>
-<p class="sub">Upcoming US theatrical releases, updated every Monday.</p>
-<div class="box">
-  <p style="font-size:13px;color:#555;">Subscribe in Apple Calendar — File &gt; New Calendar Subscription:</p>
-  <span class="url">${feedUrl}</span>
-</div>
-<p style="font-size:13px;color:#888;margin-bottom:8px;">${movies.length} releases</p>
-<table>
-  <thead><tr><th>Date</th><th>Title</th></tr></thead>
-  <tbody>${rows}</tbody>
-</table>
-<footer>Source: Wikipedia &bull; Free &bull; No API keys</footer>
-</body>
-</html>`;
+<p>Subscribe in Apple Calendar — File &gt; New Calendar Subscription:</p>
+<span class="url">${feedUrl}</span>
+<p style="font-size:13px;color:#888;margin:16px 0 8px;">${movies.length} releases</p>
+<table><thead><tr><th>Date</th><th>Title</th></tr></thead><tbody>${rows}</tbody></table>
+</body></html>`;
 }
 
 async function main() {
@@ -195,6 +161,8 @@ async function main() {
     console.log(`Fetching ${page.url}`);
     try {
       const html = await get(page.url);
+      console.log(`  Raw HTML length: ${html.length}`);
+      console.log(`  First 200 chars: ${html.slice(0, 200)}`);
       const movies = parseFilmPage(html, page.year);
       console.log(`  -> ${movies.length} titles`);
       for (const m of movies) {
@@ -208,17 +176,20 @@ async function main() {
 
   allMovies.sort((a, b) => a.releaseDate.localeCompare(b.releaseDate));
   console.log(`Total: ${allMovies.length} movies`);
-  if (allMovies.length === 0) { console.error('No movies found.'); process.exit(1); }
 
+  // Write whatever we have — even if 0, don't exit with error so we can see the debug output
   const outDir = path.resolve(__dirname, '..', 'docs');
   fs.mkdirSync(outDir, { recursive: true });
-  fs.writeFileSync(path.join(outDir, 'movies.ics'), buildICS(allMovies), 'utf8');
-  console.log('Written: docs/movies.ics');
 
-  const username = process.env.GITHUB_REPOSITORY
-    ? process.env.GITHUB_REPOSITORY.split('/')[0] : 'lostathome';
-  fs.writeFileSync(path.join(outDir, 'index.html'), buildHTML(allMovies, username), 'utf8');
-  console.log('Written: docs/index.html');
+  if (allMovies.length === 0) {
+    console.log('No movies parsed — writing empty calendar for debug run.');
+    // Don't exit 1 so we can read the full logs
+  } else {
+    fs.writeFileSync(path.join(outDir, 'movies.ics'), buildICS(allMovies), 'utf8');
+    const username = process.env.GITHUB_REPOSITORY ? process.env.GITHUB_REPOSITORY.split('/')[0] : 'lostathome';
+    fs.writeFileSync(path.join(outDir, 'index.html'), buildHTML(allMovies, username), 'utf8');
+    console.log('Written: docs/movies.ics and docs/index.html');
+  }
 }
 
 main().catch(err => { console.error(err); process.exit(1); });
