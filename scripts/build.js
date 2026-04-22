@@ -2,9 +2,7 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 
-// ─── HTTP GET with redirect support ───────────────────────────────────────────
-
-function get(url, redirects = 5) {
+function get(url) {
   return new Promise((resolve, reject) => {
     const req = https.get(url, {
       headers: {
@@ -13,119 +11,99 @@ function get(url, redirects = 5) {
         'Accept-Language': 'en-US,en;q=0.9',
       }
     }, (res) => {
-      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location && redirects > 0) {
-        return get(res.headers.location, redirects - 1).then(resolve).catch(reject);
+      if ([301,302,303,307,308].includes(res.statusCode) && res.headers.location) {
+        return get(res.headers.location).then(resolve).catch(reject);
       }
       let html = '';
       res.setEncoding('utf8');
       res.on('data', chunk => html += chunk);
       res.on('end', () => resolve(html));
     });
-    req.setTimeout(20000, () => { req.destroy(); reject(new Error('Request timed out')); });
+    req.setTimeout(20000, () => { req.destroy(); reject(new Error('Timeout')); });
     req.on('error', reject);
   });
 }
 
-// ─── HTML helpers ─────────────────────────────────────────────────────────────
-
 function stripTags(s) {
   return s
     .replace(/<[^>]+>/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&#\d+;/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ')
+    .replace(/&#\d+;/g, '').replace(/\s+/g, ' ').trim();
 }
 
-// ─── Parse Wikipedia "List of American films of YYYY" ─────────────────────────
-//
-// Page structure: h2/h3 month headings, then wikitables.
-// Table columns: Opening date | Title | Production company | Director | Cast
-// Rows may use rowspan for the date cell.
-
 const MONTH_NUM = {
-  january:'01', february:'02', march:'03', april:'04',
-  may:'05', june:'06', july:'07', august:'08',
-  september:'09', october:'10', november:'11', december:'12'
+  january:'01',february:'02',march:'03',april:'04',
+  may:'05',june:'06',july:'07',august:'08',
+  september:'09',october:'10',november:'11',december:'12'
 };
 
 function parseFilmPage(html, year) {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-
   const results = [];
   const seen = new Set();
 
-  // Split HTML on h2/h3 tags to get month sections
+  // Split on month headings
   const parts = html.split(/(?=<h[23][^>]*>)/i);
-
   let currentMonth = null;
 
   for (const part of parts) {
-    // Detect month heading
     const headingMatch = part.match(/<h[23][^>]*>[\s\S]*?(January|February|March|April|May|June|July|August|September|October|November|December)[\s\S]*?<\/h[23]>/i);
     if (headingMatch) {
       currentMonth = MONTH_NUM[headingMatch[1].toLowerCase()];
     }
     if (!currentMonth) continue;
 
-    // Find all <tr> blocks in this section
+    // Parse table rows
     const trPattern = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
     let trMatch;
-
     while ((trMatch = trPattern.exec(part)) !== null) {
       const rowHtml = trMatch[1];
-
-      // Pull out <td> cells
       const tds = [];
       const tdPattern = /<td[^>]*>([\s\S]*?)<\/td>/gi;
       let tdMatch;
       while ((tdMatch = tdPattern.exec(rowHtml)) !== null) {
         tds.push(stripTags(tdMatch[1]));
       }
-
       if (tds.length < 2) continue;
 
-      // ── Date (first cell) ──
       const rawDate = tds[0];
       let day = null;
+      let monthOverride = null;
 
-      // "April 3" or "April 3, 2026"
       const longDate = rawDate.match(/(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2})/i);
       if (longDate) {
-        currentMonth = MONTH_NUM[longDate[1].toLowerCase()];
+        monthOverride = MONTH_NUM[longDate[1].toLowerCase()];
         day = longDate[2].padStart(2, '0');
       } else {
-        // Plain day number "3" or "03"
         const shortDay = rawDate.match(/^(\d{1,2})$/);
         if (shortDay) day = shortDay[1].padStart(2, '0');
       }
 
       if (!day) continue;
+      const month = monthOverride || currentMonth;
 
-      // ── Title (second cell) ──
       let title = tds[1]
-        .replace(/\(.*?\)/g, '')   // strip parentheticals like (limited)
-        .replace(/\[.*?\]/g, '')   // strip footnotes like [1]
+        .replace(/\(.*?\)/g, '')
+        .replace(/\[.*?\]/g, '')
         .trim();
 
       if (!title || title.length < 2) continue;
       if (/^(title|film|movie|opening|release date)/i.test(title)) continue;
 
-      // ── Build and validate date ──
-      const dateStr = `${year}-${currentMonth}-${day}`;
-      const releaseDate = new Date(dateStr + 'T12:00:00');
-      if (isNaN(releaseDate) || releaseDate < today) continue;
+      const dateStr = `${year}-${month}-${day}`;
+
+      // Validate date is real
+      const rd = new Date(dateStr + 'T12:00:00');
+      if (isNaN(rd.getTime())) continue;
+
+      // Only skip dates more than 30 days in the past (allow recently released films)
+      const cutoff = new Date();
+      cutoff.setDate(cutoff.getDate() - 30);
+      if (rd < cutoff) continue;
 
       const key = `${dateStr}::${title.toLowerCase()}`;
       if (seen.has(key)) continue;
       seen.add(key);
-
       results.push({ title, releaseDate: dateStr });
     }
   }
@@ -134,11 +112,8 @@ function parseFilmPage(html, year) {
   return results;
 }
 
-// ─── Build .ics ───────────────────────────────────────────────────────────────
-
 function buildICS(movies) {
   const stamp = new Date().toISOString().replace(/[-:.]/g, '').slice(0, 15) + 'Z';
-
   const lines = [
     'BEGIN:VCALENDAR',
     'VERSION:2.0',
@@ -158,32 +133,16 @@ function buildICS(movies) {
     const end = endDate.toISOString().slice(0, 10).replace(/-/g, '');
     const uid = `movie-${start}-${i}@lostathome-movie-ical`;
     const summary = m.title.replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,');
-
-    lines.push(
-      'BEGIN:VEVENT',
-      `UID:${uid}`,
-      `DTSTAMP:${stamp}`,
-      `DTSTART;VALUE=DATE:${start}`,
-      `DTEND;VALUE=DATE:${end}`,
-      `SUMMARY:${summary}`,
-      'END:VEVENT'
-    );
+    lines.push('BEGIN:VEVENT', `UID:${uid}`, `DTSTAMP:${stamp}`, `DTSTART;VALUE=DATE:${start}`, `DTEND;VALUE=DATE:${end}`, `SUMMARY:${summary}`, 'END:VEVENT');
   });
 
   lines.push('END:VCALENDAR');
   return lines.join('\r\n');
 }
 
-// ─── Build index.html ─────────────────────────────────────────────────────────
-
 function buildHTML(movies, username) {
   const feedUrl = `https://${username}.github.io/movie-ical/movies.ics`;
-  const rows = movies.map(m => `
-    <tr>
-      <td>${m.releaseDate}</td>
-      <td>${m.title}</td>
-    </tr>`).join('');
-
+  const rows = movies.map(m => `<tr><td>${m.releaseDate}</td><td>${m.title}</td></tr>`).join('\n');
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -202,32 +161,25 @@ function buildHTML(movies, username) {
   th { text-align: left; font-size: 12px; color: #888; font-weight: 500; padding: 0 0 8px; border-bottom: 1px solid #eee; }
   td { padding: 8px 0; border-bottom: 1px solid #f0f0f0; vertical-align: top; }
   td:first-child { color: #888; font-size: 13px; width: 120px; padding-right: 12px; white-space: nowrap; }
-  .count { font-size: 13px; color: #888; margin-top: 8px; }
   footer { margin-top: 40px; font-size: 12px; color: #bbb; }
 </style>
 </head>
 <body>
 <h1>🎬 Theater Releases iCal</h1>
 <p class="sub">Upcoming US theatrical releases. Updated every Monday via GitHub Actions.</p>
-
 <div class="box">
   <p>Subscribe in Apple Calendar — File &gt; New Calendar Subscription — paste this URL:</p>
   <span class="url">${feedUrl}</span>
 </div>
-
-<p class="count">${movies.length} upcoming releases</p>
-
+<p style="font-size:13px;color:#888;">${movies.length} releases found</p>
 <table>
   <thead><tr><th>Date</th><th>Title</th></tr></thead>
   <tbody>${rows}</tbody>
 </table>
-
 <footer>Source: Wikipedia &bull; No API keys &bull; Completely free</footer>
 </body>
 </html>`;
 }
-
-// ─── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
   const today = new Date();
@@ -247,13 +199,10 @@ async function main() {
     try {
       const html = await get(page.url);
       const movies = parseFilmPage(html, page.year);
-      console.log(`  -> ${movies.length} upcoming titles found`);
+      console.log(`  -> ${movies.length} titles found`);
       for (const m of movies) {
         const key = `${m.releaseDate}::${m.title.toLowerCase()}`;
-        if (!globalSeen.has(key)) {
-          globalSeen.add(key);
-          allMovies.push(m);
-        }
+        if (!globalSeen.has(key)) { globalSeen.add(key); allMovies.push(m); }
       }
     } catch (err) {
       console.warn(`  -> Failed: ${err.message}`);
@@ -263,29 +212,18 @@ async function main() {
   allMovies.sort((a, b) => a.releaseDate.localeCompare(b.releaseDate));
   console.log(`Total: ${allMovies.length} movies`);
 
-  if (allMovies.length === 0) {
-    console.error('No movies found. Exiting without writing files.');
-    process.exit(1);
-  }
+  if (allMovies.length === 0) { console.error('No movies found.'); process.exit(1); }
 
-  const outDir = path.resolve(__dirname, '..', 'docs');
+  const outDir = path.resolve(__dirname, 'docs');
   fs.mkdirSync(outDir, { recursive: true });
+  fs.writeFileSync(path.join(outDir, 'movies.ics'), buildICS(allMovies), 'utf8');
+  console.log('Written: docs/movies.ics');
 
-  const icsPath = path.join(outDir, 'movies.ics');
-  fs.writeFileSync(icsPath, buildICS(allMovies), 'utf8');
-  console.log(`Written: ${icsPath}`);
-
-  // Read GitHub username from env or fall back to placeholder
   const username = process.env.GITHUB_REPOSITORY
     ? process.env.GITHUB_REPOSITORY.split('/')[0]
-    : 'YOUR-USERNAME';
-
-  const htmlPath = path.join(outDir, 'index.html');
-  fs.writeFileSync(htmlPath, buildHTML(allMovies, username), 'utf8');
-  console.log(`Written: ${htmlPath}`);
+    : 'lostathome';
+  fs.writeFileSync(path.join(outDir, 'index.html'), buildHTML(allMovies, username), 'utf8');
+  console.log('Written: docs/index.html');
 }
 
-main().catch(err => {
-  console.error(err);
-  process.exit(1);
-});
+main().catch(err => { console.error(err); process.exit(1); });
