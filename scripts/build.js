@@ -43,65 +43,55 @@ function parseHTML(html, year) {
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - 30);
 
-  let currentMonth = null;
+  // Only use full dates from table cells — never infer month from headings.
+  // The first cell of each date row always contains "Month Day" e.g. "May 22".
+  // Subsequent rows on the same date have a rowspan and omit the date cell,
+  // so we track the last seen date and reuse it.
 
-  // Process the HTML token by token in order
-  // We look for: headings (h2/h3), and table rows (tr with td cells)
-  // Key: we must detect month from headings BEFORE processing rows
+  let lastDate = null;
 
-  const tokenRe = /<(h[23])\b[^>]*>([\s\S]*?)<\/h[23]>|<tr\b[^>]*>([\s\S]*?)<\/tr>/gi;
-  let match;
+  const trRe = /<tr\b[^>]*>([\s\S]*?)<\/tr>/gi;
+  let trMatch;
 
-  while ((match = tokenRe.exec(html)) !== null) {
-    if (match[1]) {
-      // It's a heading — check every month name
-      const text = stripTags(match[2]).toLowerCase().trim();
-      // Handle "January", "January–March", "May" etc
-      for (const [name, num] of Object.entries(MONTH_NUM)) {
-        if (text === name || text.startsWith(name + '\u2013') || text.startsWith(name + '-') || text.startsWith(name + ' ')) {
-          currentMonth = num;
-          console.log(`  Month: ${name} (${num}) from heading: "${text.slice(0,40)}"`);
-          break;
-        }
-      }
-      continue;
-    }
-
-    // It's a table row
-    if (!currentMonth) continue;
-
-    const rowHtml = match[3];
+  while ((trMatch = trRe.exec(html)) !== null) {
+    const rowHtml = trMatch[1];
     const cells = [];
-    const cellRe = /<td\b[^>]*>([\s\S]*?)<\/td>/gi;
-    let cellMatch;
-    while ((cellMatch = cellRe.exec(rowHtml)) !== null) {
-      cells.push(stripTags(cellMatch[1]).trim());
+    const tdRe = /<td\b[^>]*>([\s\S]*?)<\/td>/gi;
+    let tdMatch;
+    while ((tdMatch = tdRe.exec(rowHtml)) !== null) {
+      cells.push(stripTags(tdMatch[1]).trim());
     }
-    if (cells.length < 2) continue;
+    if (cells.length < 1) continue;
 
-    let day = null;
+    let dateStr = null;
+    let titleIdx = 1;
+
+    // Check first cell for a full "Month Day" date
     const c0 = cells[0];
-
-    // Check for full date in first cell e.g. "January 5" — this can override current month
-    const longDate = c0.match(/\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2})\b/i);
-    if (longDate) {
-      currentMonth = MONTH_NUM[longDate[1].toLowerCase()];
-      day = longDate[2].padStart(2, '0');
-    } else {
-      // Plain day number only
-      const m = c0.match(/^(\d{1,2})$/);
-      if (m) day = m[1].padStart(2, '0');
+    const fullDate = c0.match(/\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2})\b/i);
+    if (fullDate) {
+      const month = MONTH_NUM[fullDate[1].toLowerCase()];
+      const day = fullDate[2].padStart(2, '0');
+      dateStr = `${year}-${month}-${day}`;
+      lastDate = dateStr;
+      titleIdx = 1;
+    } else if (lastDate && cells.length >= 1) {
+      // No date in first cell — this row shares the date from above (rowspan)
+      dateStr = lastDate;
+      titleIdx = 0;
     }
 
-    if (!day) continue;
-    const dayNum = parseInt(day);
-    if (dayNum < 1 || dayNum > 31) continue;
+    if (!dateStr) continue;
 
-    let title = cells[1].replace(/\(.*?\)/g, '').replace(/\[.*?\]/g, '').trim();
+    const titleCell = cells[titleIdx];
+    if (!titleCell) continue;
+
+    let title = titleCell.replace(/\(.*?\)/g, '').replace(/\[.*?\]/g, '').trim();
     if (!title || title.length < 2) continue;
-    if (/^(title|film|opening|release|tba|tbd)/i.test(title)) continue;
+    if (/^(title|film|opening|release|tba|tbd|\$[\d,])/i.test(title)) continue;
+    // Skip if it looks like a studio name or person name row
+    if (/^(warner|disney|paramount|universal|sony|netflix|amazon|apple|lionsgate|mgm|columbia|fox|a24|neon)/i.test(title)) continue;
 
-    const dateStr = `${year}-${currentMonth}-${day}`;
     const rd = new Date(dateStr + 'T12:00:00');
     if (isNaN(rd.getTime()) || rd < cutoff) continue;
 
@@ -171,18 +161,9 @@ async function main() {
       const url = `https://en.wikipedia.org/api/rest_v1/page/html/${page.title}`;
       const html = await get(url);
       console.log(`  HTML length: ${html.length}`);
-
-      // Print all headings for debugging
-      const headingRe = /<h[23]\b[^>]*>([\s\S]*?)<\/h[23]>/gi;
-      let hm;
-      const headings = [];
-      while ((hm = headingRe.exec(html)) !== null) {
-        headings.push(stripTags(hm[1]).trim());
-      }
-      console.log(`  Headings found: ${headings.slice(0, 20).join(' | ')}`);
-
       const movies = parseHTML(html, page.year);
       console.log(`  -> ${movies.length} titles found`);
+      movies.slice(0, 5).forEach(m => console.log(`     ${m.releaseDate} ${m.title}`));
       for (const m of movies) {
         const key = `${m.releaseDate}::${m.title.toLowerCase()}`;
         if (!globalSeen.has(key)) { globalSeen.add(key); allMovies.push(m); }
@@ -194,8 +175,6 @@ async function main() {
 
   allMovies.sort((a, b) => a.releaseDate.localeCompare(b.releaseDate));
   console.log(`Total: ${allMovies.length} movies`);
-  if (allMovies.length > 0) console.log(`First: ${allMovies[0].releaseDate} ${allMovies[0].title}`);
-  if (allMovies.length > 1) console.log(`Sample mid: ${allMovies[Math.floor(allMovies.length/2)].releaseDate} ${allMovies[Math.floor(allMovies.length/2)].title}`);
 
   const outDir = path.resolve(__dirname, '..', 'docs');
   fs.mkdirSync(outDir, { recursive: true });
