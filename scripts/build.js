@@ -23,16 +23,37 @@ function get(url) {
   });
 }
 
-function stripWiki(s) {
+function post(hostname, path, body) {
+  return new Promise((resolve, reject) => {
+    const bodyStr = body;
+    const req = https.request({
+      hostname,
+      path,
+      method: 'POST',
+      headers: {
+        'User-Agent': 'movie-ical-bot/2.0 (https://github.com/lostathome/movie-ical)',
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Length': Buffer.byteLength(bodyStr),
+      }
+    }, (res) => {
+      let data = '';
+      res.setEncoding('utf8');
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => resolve(data));
+    });
+    req.setTimeout(30000, () => { req.destroy(); reject(new Error('Timeout')); });
+    req.on('error', reject);
+    req.write(bodyStr);
+    req.end();
+  });
+}
+
+function stripTags(s) {
   return s
-    .replace(/\[\[(?:[^\]|]+\|)?([^\]]+)\]\]/g, '$1')
-    .replace(/\{\{[^}]*\}\}/g, '')
     .replace(/<[^>]+>/g, ' ')
-    .replace(/'{2,}/g, '')
     .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ')
-    .replace(/&#\d+;/g, '')
-    .replace(/\s+/g, ' ').trim();
+    .replace(/&#\d+;/g, '').replace(/\s+/g, ' ').trim();
 }
 
 const MONTH_NUM = {
@@ -41,54 +62,60 @@ const MONTH_NUM = {
   september:'09', october:'10', november:'11', december:'12'
 };
 
-function parseWikitext(wikitext, year) {
+function parseHTML(html, year) {
   const results = [];
   const seen = new Set();
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - 30);
 
-  const lines = wikitext.split('\n');
   let currentMonth = null;
 
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
+  // Find month headings: <h2...>January</h2> or <h3...>
+  // Find table rows: <tr>...</tr>
+  // Split on tags we care about
 
-    // Month headings: ==January== or == January == or ==January–March==
-    const headingMatch = trimmed.match(/^=+\s*(January|February|March|April|May|June|July|August|September|October|November|December)[^=]*=+$/i);
-    if (headingMatch) {
-      currentMonth = MONTH_NUM[headingMatch[1].toLowerCase()];
+  // Extract all headings and table rows in document order
+  const tokenRe = /<(h[23])[^>]*>([\s\S]*?)<\/h[23]>|<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+  let match;
+
+  while ((match = tokenRe.exec(html)) !== null) {
+    if (match[1]) {
+      // Heading
+      const headingText = stripTags(match[2]).trim();
+      for (const [name, num] of Object.entries(MONTH_NUM)) {
+        if (headingText.toLowerCase().startsWith(name)) {
+          currentMonth = num;
+          break;
+        }
+      }
       continue;
     }
 
+    // Table row
     if (!currentMonth) continue;
+    const rowHtml = match[3];
 
-    // Wiki table rows: | January 5 || ''[[Title]]'' || Studio ...
-    // or:              | 5 || ''[[Title]]'' || Studio ...
-    if (!trimmed.startsWith('|')) continue;
-    if (trimmed.startsWith('|-') || trimmed.startsWith('|+') || trimmed.startsWith('|}') || trimmed.startsWith('|!') || trimmed.startsWith('! ')) continue;
-
-    const raw = trimmed.slice(1);
-    const cells = raw.split(/\|\|/).map(c => stripWiki(c).trim());
+    // Extract <td> cells
+    const cells = [];
+    const cellRe = /<td[^>]*>([\s\S]*?)<\/td>/gi;
+    let cellMatch;
+    while ((cellMatch = cellRe.exec(rowHtml)) !== null) {
+      cells.push(stripTags(cellMatch[1]));
+    }
     if (cells.length < 2) continue;
 
     let day = null;
     let titleIdx = 1;
+    const c0 = cells[0].trim();
 
-    const c0 = cells[0];
-    // Try "January 5" or "May 22"
+    // "January 5" or "May 22"
     const longDate = c0.match(/(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2})/i);
     if (longDate) {
       currentMonth = MONTH_NUM[longDate[1].toLowerCase()];
       day = longDate[2].padStart(2, '0');
-      titleIdx = 1;
     } else {
-      // Try plain day "5" or "22"
       const shortDay = c0.match(/^(\d{1,2})$/);
-      if (shortDay) {
-        day = shortDay[1].padStart(2, '0');
-        titleIdx = 1;
-      }
+      if (shortDay) day = shortDay[1].padStart(2, '0');
     }
 
     if (!day) continue;
@@ -97,7 +124,7 @@ function parseWikitext(wikitext, year) {
 
     let title = (cells[titleIdx] || '').replace(/\(.*?\)/g, '').replace(/\[.*?\]/g, '').trim();
     if (!title || title.length < 2) continue;
-    if (/^(title|film|opening|release|tba|tbd|\d)/i.test(title)) continue;
+    if (/^(title|film|opening|release|tba|tbd)/i.test(title)) continue;
 
     const dateStr = `${year}-${currentMonth}-${day}`;
     const rd = new Date(dateStr + 'T12:00:00');
@@ -164,29 +191,18 @@ async function main() {
   const globalSeen = new Set();
 
   for (const page of pages) {
-    // Step 1: get raw wikitext
-    const wikitextUrl = `https://en.wikipedia.org/w/api.php?action=query&titles=${page.title}&prop=revisions&rvprop=content&rvslots=main&format=json&formatversion=2`;
     console.log(`Fetching: ${page.title}`);
     try {
-      const raw = await get(wikitextUrl);
-      const json = JSON.parse(raw);
-      const pageData = json.query.pages[0];
-      if (!pageData || pageData.missing) { console.log('  -> Not found'); continue; }
-      let wikitext = pageData.revisions[0].slots.main.content;
-      console.log(`  -> Raw wikitext: ${wikitext.length} chars`);
+      // Use Wikipedia REST API - returns clean parsed HTML
+      const url = `https://en.wikipedia.org/api/rest_v1/page/html/${page.title}`;
+      const html = await get(url);
+      console.log(`  -> HTML length: ${html.length}`);
 
-      // Step 2: if it uses {{Americanfilmlist}}, expand it via the API
-      if (wikitext.includes('{{Americanfilmlist}}') || wikitext.includes('{{americanfilmlist}}')) {
-        console.log('  -> Uses Americanfilmlist template, expanding...');
-        const expandUrl = `https://en.wikipedia.org/w/api.php?action=expandtemplates&title=${page.title}&text=${encodeURIComponent(wikitext)}&prop=wikitext&format=json`;
-        const expandRaw = await get(expandUrl);
-        const expandJson = JSON.parse(expandRaw);
-        wikitext = expandJson.expandtemplates.wikitext;
-        console.log(`  -> Expanded wikitext: ${wikitext.length} chars`);
-        console.log(`  -> Sample: ${wikitext.slice(0, 400)}`);
-      }
+      // Show first heading found
+      const h2match = html.match(/<h[23][^>]*>([\s\S]*?)<\/h[23]>/i);
+      if (h2match) console.log(`  -> First heading: ${stripTags(h2match[1]).slice(0, 80)}`);
 
-      const movies = parseWikitext(wikitext, page.year);
+      const movies = parseHTML(html, page.year);
       console.log(`  -> ${movies.length} titles found`);
       for (const m of movies) {
         const key = `${m.releaseDate}::${m.title.toLowerCase()}`;
