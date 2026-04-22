@@ -18,20 +18,20 @@ function get(url) {
       res.on('data', chunk => data += chunk);
       res.on('end', () => resolve(data));
     });
-    req.setTimeout(20000, () => { req.destroy(); reject(new Error('Timeout')); });
+    req.setTimeout(30000, () => { req.destroy(); reject(new Error('Timeout')); });
     req.on('error', reject);
   });
 }
 
-function stripTags(s) {
+function stripWiki(s) {
   return s
-    .replace(/\[\[([^\]|]+\|)?([^\]]+)\]\]/g, '$2') // wiki links [[text|label]] -> label
-    .replace(/\[\[([^\]]+)\]\]/g, '$1')
-    .replace(/\{\{[^}]+\}\}/g, '')                   // templates {{...}}
-    .replace(/<[^>]+>/g, ' ')                         // html tags
+    .replace(/\[\[(?:[^\]|]+\|)?([^\]]+)\]\]/g, '$1')
+    .replace(/\{\{[^}]*\}\}/g, '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/'{2,}/g, '')
     .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ')
-    .replace(/&#\d+;/g, '').replace(/'{2,}/g, '')     // wiki bold/italic ''
+    .replace(/&#\d+;/g, '')
     .replace(/\s+/g, ' ').trim();
 }
 
@@ -54,63 +54,50 @@ function parseWikitext(wikitext, year) {
     const trimmed = line.trim();
     if (!trimmed) continue;
 
-    // Detect month headings: ==January== or ===January=== or just "January"
-    const headingMatch = trimmed.match(/^=+\s*(January|February|March|April|May|June|July|August|September|October|November|December)\s*=+$/i);
+    // Month headings: ==January== or == January == or ==January–March==
+    const headingMatch = trimmed.match(/^=+\s*(January|February|March|April|May|June|July|August|September|October|November|December)[^=]*=+$/i);
     if (headingMatch) {
       currentMonth = MONTH_NUM[headingMatch[1].toLowerCase()];
       continue;
     }
 
-    // Also detect plain month name on its own line
-    const plainMonth = trimmed.replace(/^[=\s]+|[=\s]+$/g, '').toLowerCase();
-    if (MONTH_NUM[plainMonth]) {
-      currentMonth = MONTH_NUM[plainMonth];
-      continue;
-    }
-
     if (!currentMonth) continue;
 
-    // Wiki table rows start with |-  or | 
-    // Film rows look like: | ''[[Film Title]]'' || Studio || Director || Cast
-    // or date rows: | January 9 || ''[[Film]]'' || ...
-    // or: | 9 || ''[[Film]]'' || ...
-
+    // Wiki table rows: | January 5 || ''[[Title]]'' || Studio ...
+    // or:              | 5 || ''[[Title]]'' || Studio ...
     if (!trimmed.startsWith('|')) continue;
-    if (trimmed.startsWith('|-') || trimmed.startsWith('|+') || trimmed.startsWith('|}')) continue;
+    if (trimmed.startsWith('|-') || trimmed.startsWith('|+') || trimmed.startsWith('|}') || trimmed.startsWith('|!') || trimmed.startsWith('! ')) continue;
 
-    // Split cells by || 
-    const cells = trimmed.slice(1).split('||').map(c => stripTags(c.replace(/^[\s!]+/, '')).trim());
+    const raw = trimmed.slice(1);
+    const cells = raw.split(/\|\|/).map(c => stripWiki(c).trim());
     if (cells.length < 2) continue;
 
     let day = null;
     let titleIdx = 1;
 
-    // Check if first cell is a date
-    const firstCell = cells[0].trim();
-    const dateMatch = firstCell.match(/(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2})/i);
-    if (dateMatch) {
-      currentMonth = MONTH_NUM[dateMatch[1].toLowerCase()];
-      day = dateMatch[2].padStart(2, '0');
+    const c0 = cells[0];
+    // Try "January 5" or "May 22"
+    const longDate = c0.match(/(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2})/i);
+    if (longDate) {
+      currentMonth = MONTH_NUM[longDate[1].toLowerCase()];
+      day = longDate[2].padStart(2, '0');
       titleIdx = 1;
     } else {
-      const dayOnly = firstCell.match(/^(\d{1,2})$/);
-      if (dayOnly) {
-        day = dayOnly[1].padStart(2, '0');
+      // Try plain day "5" or "22"
+      const shortDay = c0.match(/^(\d{1,2})$/);
+      if (shortDay) {
+        day = shortDay[1].padStart(2, '0');
         titleIdx = 1;
-      } else {
-        // First cell might be the title itself (no date column)
-        // Try to use it as title
-        titleIdx = 0;
-        day = null;
       }
     }
 
     if (!day) continue;
+    const dayNum = parseInt(day);
+    if (dayNum < 1 || dayNum > 31) continue;
 
-    let title = cells[titleIdx] || '';
-    title = title.replace(/\(.*?\)/g, '').replace(/\[.*?\]/g, '').trim();
+    let title = (cells[titleIdx] || '').replace(/\(.*?\)/g, '').replace(/\[.*?\]/g, '').trim();
     if (!title || title.length < 2) continue;
-    if (/^(title|film|opening|release|tba|tbd)/i.test(title)) continue;
+    if (/^(title|film|opening|release|tba|tbd|\d)/i.test(title)) continue;
 
     const dateStr = `${year}-${currentMonth}-${day}`;
     const rd = new Date(dateStr + 'T12:00:00');
@@ -153,11 +140,9 @@ function buildHTML(movies, username) {
   return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>Theater Releases iCal</title>
 <style>body{font-family:system-ui,sans-serif;max-width:680px;margin:0 auto;padding:40px 20px;}
 .url{font-family:monospace;font-size:13px;word-break:break-all;background:#f5f5f5;padding:10px;border-radius:6px;display:block;margin:8px 0 24px;}
-table{width:100%;border-collapse:collapse;font-size:14px;}
-th{text-align:left;font-size:12px;color:#888;padding-bottom:8px;border-bottom:1px solid #eee;}
+table{width:100%;border-collapse:collapse;font-size:14px;}th{text-align:left;font-size:12px;color:#888;padding-bottom:8px;border-bottom:1px solid #eee;}
 td{padding:7px 0;border-bottom:1px solid #f0f0f0;}td:first-child{color:#888;font-size:13px;width:110px;}</style>
-</head><body>
-<h1>Theater Releases iCal</h1>
+</head><body><h1>Theater Releases iCal</h1>
 <p>Apple Calendar → File → New Calendar Subscription:</p>
 <span class="url">${feedUrl}</span>
 <p style="font-size:13px;color:#888;margin-bottom:8px;">${movies.length} releases</p>
@@ -170,7 +155,6 @@ async function main() {
   const thisYear = today.getFullYear();
   const nextYear = thisYear + 1;
 
-  // Use Wikipedia's API to get raw wikitext — much cleaner than scraping HTML
   const pages = [
     { title: `List_of_American_films_of_${thisYear}`, year: thisYear },
     { title: `List_of_American_films_of_${nextYear}`, year: nextYear },
@@ -180,16 +164,28 @@ async function main() {
   const globalSeen = new Set();
 
   for (const page of pages) {
-    const url = `https://en.wikipedia.org/w/api.php?action=query&titles=${page.title}&prop=revisions&rvprop=content&rvslots=main&format=json&formatversion=2`;
-    console.log(`Fetching wikitext for: ${page.title}`);
+    // Step 1: get raw wikitext
+    const wikitextUrl = `https://en.wikipedia.org/w/api.php?action=query&titles=${page.title}&prop=revisions&rvprop=content&rvslots=main&format=json&formatversion=2`;
+    console.log(`Fetching: ${page.title}`);
     try {
-      const raw = await get(url);
+      const raw = await get(wikitextUrl);
       const json = JSON.parse(raw);
       const pageData = json.query.pages[0];
-      if (!pageData || pageData.missing) { console.log('  -> Page not found'); continue; }
-      const wikitext = pageData.revisions[0].slots.main.content;
-      console.log(`  -> Wikitext length: ${wikitext.length}`);
-      console.log(`  -> Sample: ${wikitext.slice(0, 300)}`);
+      if (!pageData || pageData.missing) { console.log('  -> Not found'); continue; }
+      let wikitext = pageData.revisions[0].slots.main.content;
+      console.log(`  -> Raw wikitext: ${wikitext.length} chars`);
+
+      // Step 2: if it uses {{Americanfilmlist}}, expand it via the API
+      if (wikitext.includes('{{Americanfilmlist}}') || wikitext.includes('{{americanfilmlist}}')) {
+        console.log('  -> Uses Americanfilmlist template, expanding...');
+        const expandUrl = `https://en.wikipedia.org/w/api.php?action=expandtemplates&title=${page.title}&text=${encodeURIComponent(wikitext)}&prop=wikitext&format=json`;
+        const expandRaw = await get(expandUrl);
+        const expandJson = JSON.parse(expandRaw);
+        wikitext = expandJson.expandtemplates.wikitext;
+        console.log(`  -> Expanded wikitext: ${wikitext.length} chars`);
+        console.log(`  -> Sample: ${wikitext.slice(0, 400)}`);
+      }
+
       const movies = parseWikitext(wikitext, page.year);
       console.log(`  -> ${movies.length} titles found`);
       for (const m of movies) {
@@ -211,7 +207,7 @@ async function main() {
     const username = process.env.GITHUB_REPOSITORY ? process.env.GITHUB_REPOSITORY.split('/')[0] : 'lostathome';
     fs.writeFileSync(path.join(outDir, 'movies.ics'), buildICS(allMovies), 'utf8');
     fs.writeFileSync(path.join(outDir, 'index.html'), buildHTML(allMovies, username), 'utf8');
-    console.log('Written: docs/movies.ics and docs/index.html');
+    console.log('Written successfully.');
   } else {
     console.error('No movies found.');
     process.exit(1);
