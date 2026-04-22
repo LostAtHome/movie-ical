@@ -38,10 +38,14 @@ const MONTH_NUM = {
   september:'09', october:'10', november:'11', december:'12'
 };
 
-// Wikipedia serves a hybrid format:
-// Month headings like "J A N U A R Y" or "JANUARY" or "January"
-// Date rows like "2; We Bury the Dead; ..." or "30: Send Help; ..."
-// Also standard table rows with <td> cells
+// Detect spaced-out month names like "J A N U A R Y" or "M A Y"
+function detectSpacedMonth(str) {
+  const collapsed = str.replace(/\s+/g, '').toLowerCase();
+  for (const [name, num] of Object.entries(MONTH_NUM)) {
+    if (collapsed === name || collapsed.startsWith(name + ':')) return num;
+  }
+  return null;
+}
 
 function parseFilmPage(html, year) {
   const results = [];
@@ -49,86 +53,64 @@ function parseFilmPage(html, year) {
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - 30);
 
-  // ── Strategy 1: parse <td> table rows ──────────────────────────────────────
-  // Split by month headings first
-  const monthHeadingRe = /(January|February|March|April|May|June|July|August|September|October|November|December)/gi;
-  const sections = html.split(/<h[23][^>]*>/i);
-  let currentMonth = null;
-
-  for (const section of sections) {
-    const mMatch = section.match(/^[\s\S]*?(January|February|March|April|May|June|July|August|September|October|November|December)/i);
-    if (mMatch) currentMonth = MONTH_NUM[mMatch[1].toLowerCase()];
-    if (!currentMonth) continue;
-
-    // Find <tr> blocks
-    const trRe = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
-    let trMatch;
-    while ((trMatch = trRe.exec(section)) !== null) {
-      const tds = [];
-      const tdRe = /<td[^>]*>([\s\S]*?)<\/td>/gi;
-      let tdMatch;
-      while ((tdMatch = tdRe.exec(trMatch[1])) !== null) {
-        tds.push(stripTags(tdMatch[1]));
-      }
-      if (tds.length < 2) continue;
-
-      const rawDate = tds[0];
-      let day = null;
-      let monthOverride = null;
-
-      const longDate = rawDate.match(/(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2})/i);
-      if (longDate) {
-        monthOverride = MONTH_NUM[longDate[1].toLowerCase()];
-        day = longDate[2].padStart(2, '0');
-      } else {
-        const shortDay = rawDate.match(/^(\d{1,2})$/);
-        if (shortDay) day = shortDay[1].padStart(2, '0');
-      }
-
-      if (!day) continue;
-      const month = monthOverride || currentMonth;
-      const dateStr = `${year}-${month}-${day}`;
-      const rd = new Date(dateStr + 'T12:00:00');
-      if (isNaN(rd.getTime()) || rd < cutoff) continue;
-
-      let title = tds[1].replace(/\(.*?\)/g, '').replace(/\[.*?\]/g, '').trim();
-      if (!title || title.length < 2 || /^(title|film|opening|release)/i.test(title)) continue;
-
-      const key = `${dateStr}::${title.toLowerCase()}`;
-      if (!seen.has(key)) { seen.add(key); results.push({ title, releaseDate: dateStr }); }
-    }
-  }
-
-  // ── Strategy 2: parse the text/markdown format Wikipedia sometimes returns ──
-  // Matches: "30: Send Help; Studio; ..." or "2; We Bury the Dead; ..."
-  // Month markers: "J A N U A R Y" or spread-out month names
   const text = stripTags(html);
   const lines = text.split('\n');
-  let textMonth = null;
+
+  let currentMonth = null;
 
   for (const line of lines) {
     const trimmed = line.trim();
+    if (!trimmed) continue;
 
-    // Detect month — handle "J A N U A R Y" spaced format and normal
-    const collapsed = trimmed.replace(/\s+/g, '').toLowerCase();
-    for (const [name, num] of Object.entries(MONTH_NUM)) {
-      if (collapsed === name || collapsed.startsWith(name + ':') || collapsed.startsWith(name + '2') || trimmed.toLowerCase().startsWith(name)) {
-        textMonth = num;
-        break;
+    // ── Detect month heading ──────────────────────────────────────────────────
+    // Handles "J A N U A R Y", "J A N U A R Y:", "JANUARY", "January", etc.
+    // Also handles lines like "J A N U A R Y: 2; Movie Title; ..."
+    // Extract just the month part before any colon+digits
+    const monthPart = trimmed.split(':')[0].trim();
+    const spaced = detectSpacedMonth(monthPart);
+    if (spaced) {
+      currentMonth = spaced;
+      // After setting month, check if there's a movie on the same line
+      // e.g. "J A N U A R Y: 2; We Bury the Dead; ..."
+      const afterColon = trimmed.indexOf(':');
+      if (afterColon !== -1) {
+        const rest = trimmed.slice(afterColon + 1).trim();
+        const rowMatch = rest.match(/^(\d{1,2})\s*[;:]\s*([^;|]+)/);
+        if (rowMatch) {
+          const day = rowMatch[1].padStart(2, '0');
+          let title = rowMatch[2].replace(/\(.*?\)/g, '').replace(/\[.*?\]/g, '').trim();
+          if (title && title.length >= 2 && !/^(title|film|opening|release)/i.test(title)) {
+            const dateStr = `${year}-${currentMonth}-${day}`;
+            const rd = new Date(dateStr + 'T12:00:00');
+            if (!isNaN(rd.getTime()) && rd >= cutoff) {
+              const key = `${dateStr}::${title.toLowerCase()}`;
+              if (!seen.has(key)) { seen.add(key); results.push({ title, releaseDate: dateStr }); }
+            }
+          }
+        }
       }
+      continue;
     }
 
-    if (!textMonth) continue;
+    if (!currentMonth) continue;
 
-    // Match "DD: Title; ..." or "DD; Title; ..."
-    const rowMatch = trimmed.match(/^(\d{1,2})\s*[;:]\s*([^;]+)/);
+    // ── Detect movie rows ─────────────────────────────────────────────────────
+    // Format: "22; The Mandalorian and Grogu; Studio; ..."
+    // or:     "22: The Mandalorian and Grogu; Studio; ..."
+    const rowMatch = trimmed.match(/^(\d{1,2})\s*[;:]\s*([^;|]+)/);
     if (!rowMatch) continue;
 
     const day = rowMatch[1].padStart(2, '0');
-    let title = rowMatch[2].replace(/\(.*?\)/g, '').replace(/\[.*?\]/g, '').trim();
-    if (!title || title.length < 2 || /^(title|film|opening|release)/i.test(title)) continue;
+    const dayNum = parseInt(rowMatch[1]);
+    if (dayNum < 1 || dayNum > 31) continue;
 
-    const dateStr = `${year}-${textMonth}-${day}`;
+    let title = rowMatch[2].replace(/\(.*?\)/g, '').replace(/\[.*?\]/g, '').trim();
+    if (!title || title.length < 2) continue;
+    if (/^(title|film|opening|release|rank|distributor)/i.test(title)) continue;
+    // Skip if title looks like a dollar amount or number
+    if (/^\$[\d,]/.test(title) || /^\d+$/.test(title)) continue;
+
+    const dateStr = `${year}-${currentMonth}-${day}`;
     const rd = new Date(dateStr + 'T12:00:00');
     if (isNaN(rd.getTime()) || rd < cutoff) continue;
 
